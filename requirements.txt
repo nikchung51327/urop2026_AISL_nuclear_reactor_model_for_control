@@ -1,0 +1,56 @@
+# PWR two-point plant model — dependencies
+#
+#   pip install -r requirements.txt
+#
+# Four packages; everything else the project uses is in the standard library
+# (dataclasses, typing, argparse, os, sys, copy).
+#
+# Python >= 3.9 is required, which is implied by the floors below.
+
+numpy>=2.0
+scipy>=1.13
+pandas>=2.2
+matplotlib>=3.9
+
+
+# ----------------------------------------------------------------------------
+# Why these floors
+# ----------------------------------------------------------------------------
+# numpy>=2.0      The examples integrate error signals with `np.trapezoid`,
+#                 which NumPy 2.0 introduced as the replacement for `np.trapz`.
+#                 `np.trapz` has since been removed, so the two names do not
+#                 overlap: on NumPy 1.x those snippets raise AttributeError.
+#                 Only the worked examples need this — the model itself does
+#                 not — so if you are pinned to NumPy 1.x you can lower this
+#                 floor to 1.24 and substitute `np.trapz` in your own scripts.
+#
+# scipy>=1.13     First release supporting NumPy 2. Entry points used:
+#                 integrate.solve_ivp (LSODA / BDF / Radau), linalg.solve_
+#                 continuous_are and solve_continuous_lyapunov, optimize.
+#                 lsq_linear (the bounded least squares behind the MPC
+#                 example), signal.cont2discrete.
+#
+# pandas>=2.2     First release supporting NumPy 2. Used only for the
+#                 `Result.df` table that every run returns.
+#
+# matplotlib>=3.9 First release supporting NumPy 2. Independently, the plotting
+#                 helper needs >= 3.4 for list-indexing of `ax.spines`.
+#
+# ----------------------------------------------------------------------------
+# Optional
+# ----------------------------------------------------------------------------
+# A quadratic-programming solver, needed only if you extend the MPC example
+# with *output* constraints (a hard axial-offset band). The shipped MPC
+# enforces input constraints with scipy alone and does not need this.
+#
+# osqp>=0.6
+#
+# ----------------------------------------------------------------------------
+# Tested configuration
+# ----------------------------------------------------------------------------
+# Python 3.13.16, numpy 2.5.3, scipy 1.18.1, pandas 3.0.5, matplotlib 3.11.2
+#
+# Note that only numpy is imported when you `import pwr_two_point_plant_v2`.
+# scipy, pandas and matplotlib are imported lazily, inside the functions that
+# need them — so an import error from one of those will surface on your first
+# `run()`, `Result.df` access or `plot()` call rather than at import time.
