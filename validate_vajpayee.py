@@ -51,7 +51,7 @@ RHO_A = 8.0e-4            # 80 pcm = 0.8 mK/K, the step [V] Fig. 11g shows
 ROD_FULL_TRAVEL = 231.0
 
 
-def run_case_A(plant, x0, u0, t_end, n_out):
+def run_case_A(plant, x0, u0, t_end, n_out, solver=None):
     """[V]'s "instantaneous perturbation": an EXACT step in rod reactivity.
 
     Rods in this model are VELOCITY inputs ([V] eq 50), so no history of `vrod`
@@ -67,12 +67,13 @@ def run_case_A(plant, x0, u0, t_end, n_out):
     means, and it needs no fine step bound.
     """
     pre = ClosedLoop(plant, [], x0=x0, u0=u0).run(
-        T_PERT, n_out=max(2, int(n_out * T_PERT / t_end)), max_step=T_PERT / 20)
+        T_PERT, n_out=max(2, int(n_out * T_PERT / t_end)), max_step=T_PERT / 20,
+        method=solver)
     x_mid = pre.X[:, -1].copy()
     for nm in ("rrod_1", "rrod_2"):                 # the step itself
         x_mid[plant.ix[nm]] += RHO_A
     post = ClosedLoop(plant, [], x0=x_mid, u0=u0).run(
-        t_end - T_PERT, n_out=n_out - len(pre.t), max_step=0.25)
+        t_end - T_PERT, n_out=n_out - len(pre.t), max_step=0.25, method=solver)
 
     import pandas as pd
     a, b = pre.df.copy(), post.df.copy()
@@ -182,12 +183,13 @@ PAPER = {
 
 
 def run_all(printed: bool = False, surge: bool = False,
-            scale: Optional[float] = None, hp_tau: bool = True):
+            scale: Optional[float] = None, hp_tau: bool = True,
+            solver: Optional[str] = None):
     """Run the four cases.
 
     printed : bool
         `False` (default) uses the shipped parameters, which deviate from [V]
-        Table 1 in six places -- see VALIDATION.md section 2.1.  `True` uses
+        Table 1 in six places -- see VALIDATION_AND_CONSTRAINTS.md section 4.  `True` uses
         `Params.as_printed()`, every flagged value exactly as the paper prints
         it, eq 34 included (`--printed` forces `hp_tau=False`).  Expect 40/40
         and 30/40 respectively.
@@ -195,10 +197,18 @@ def run_all(printed: bool = False, surge: bool = False,
         ADD [V] eq 32 -- surge computed from coolant expansion -- on top of the
         `mdot_sur` input.  `False` (default, and the standard configuration)
         leaves surge as a pure input, which is what reproduces Fig. 11e.
-        `True` matches his section 7.1-7.2 text instead.  See VALIDATION.md 2.1c.
+        `True` matches his section 7.1-7.2 text instead.  See VALIDATION_AND_CONSTRAINTS.md 2.1.
     scale : float, optional
         Override `pzr_partial_scale`.  `700` is the value fitted against the
         one case in Fig. 11e that moves; the shipped default is `1000`.
+    solver : str, optional
+        scipy integrator.  `None` (default) takes `ClosedLoop`'s own default,
+        which for these continuous runs is **LSODA**.  'BDF' and 'Radau' are the
+        other two stiff methods and agree with LSODA to ~1e-7 here, so this
+        changes the cost and the robustness, not the answer.  The model is stiff
+        by about seven orders of magnitude, so an explicit non-stiff method
+        ('RK45', 'DOP853') will crawl or fail -- allowed, but it is a stress
+        test, not a validation.
 
     The shipped default (`surge=False`) scores 40/40.  With `scale=700` it
     matches Fig. 11e to four decimal places on all four cases.
@@ -214,15 +224,17 @@ def run_all(printed: bool = False, surge: bool = False,
           f"   pzr_partial_scale = {p.pzr_partial_scale:g}")
     print(f"surge ([V] eq 32): {'INPUT + computed expansion' if surge else 'INPUT only (standard)'}")
     print(f"HP turbine (eq 34): {'+tau_hp, overdamped (default)' if hp_tau else 'AS PRINTED, zeta=0.32, rings'}")
+    print(f"solver: {solver or 'LSODA (default)'}")
     print(f"trim residual {res:.2e}\n")
 
     runs = {}
     for tag, desc, builder in CASES:
         if builder is None:                         # Case A: step the state
-            d = run_case_A(plant, x0, u0, T_END, 1200)
+            d = run_case_A(plant, x0, u0, T_END, 1200, solver=solver)
         else:
             loop = ClosedLoop(plant, builder(plant, u0), x0=x0, u0=u0)
-            d = loop.run(T_END, n_out=4000, max_step=MAX_STEP[tag]).df.copy()
+            d = loop.run(T_END, n_out=1200, max_step=MAX_STEP[tag],
+                         method=solver).df.copy()
         d["_rho"] = total_reactivity(plant, d)
         # Vajpayee has ONE fuel node; the two-point core has one per half and
         # they sit either side of his value (619.06 / 634.23, mean 626.64 vs
@@ -312,9 +324,32 @@ def compare(runs):
     print(f"direction of change agrees in {agree}/{total} comparisons")
 
 
+USAGE = """usage: python validate_vajpayee.py [options]
+
+  --printed          every flagged Table 1 value AND eq 34 exactly as the paper
+                     prints them.  Implies --no-hp-tau.          (expect 30/40)
+  --surge            ADD eq 32 computed surge on top of the input. (expect 37/40)
+  --no-hp-tau        eq 34 as printed: underdamped, rings for 21 s.
+  --scale N          override pzr_partial_scale (shipped 1000, fitted 700).
+  --solver NAME      scipy integrator: LSODA (default), BDF, Radau, and the
+                     non-stiff RK45 / DOP853 / RK23 if you want to watch them
+                     struggle.  Case-insensitive.
+  -h, --help         this message.
+
+With no options: 40/40.  Figures are written to validation_fig10*.png and
+validation_fig11*.png, with the options encoded in the filename."""
+
+# scipy's integrators, keyed by lower case so the CLI can be case-insensitive.
+SOLVERS = {"lsoda": "LSODA", "bdf": "BDF", "radau": "Radau",
+           "rk45": "RK45", "dop853": "DOP853", "rk23": "RK23"}
+STIFF = {"LSODA", "BDF", "Radau"}
+
 if __name__ == "__main__":
     import sys
     argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print(USAGE)
+        raise SystemExit(0)
     printed = "--printed" in argv
     surge = "--surge" in argv
     scale = None
@@ -325,13 +360,33 @@ if __name__ == "__main__":
     if "--scale" in argv:
         scale = float(argv[argv.index("--scale") + 1])
 
+    solver = None
+    if "--solver" in argv:
+        try:
+            want = argv[argv.index("--solver") + 1]
+        except IndexError:
+            raise SystemExit("--solver needs a name.  " + USAGE)
+        if want.lower() not in SOLVERS:
+            raise SystemExit(f"unknown solver {want!r}.  "
+                             f"Choose from: {', '.join(SOLVERS.values())}")
+        solver = SOLVERS[want.lower()]
+        if solver not in STIFF:
+            print(f"  ! {solver} is a NON-STIFF method and this model spans about "
+                  f"seven decades\n    of timescale.  Expect it to crawl or fail.\n")
+
+    # LSODA is ClosedLoop's own default for a continuous run, so asking for it
+    # explicitly is the standard run and keeps the standard filenames -- the
+    # docs reference validation_fig10.png without a suffix.
+    solver_tag = "" if solver in (None, "LSODA") else "_" + solver.lower()
+
     tag = ("_printed" if printed else "") + ("_surge" if surge else "") \
-          + ("" if (hp_tau or printed) else "_eq34printed")
+          + ("" if (hp_tau or printed) else "_eq34printed") + solver_tag
     sub = (" — Table 1 as printed" if printed else "") + \
           (" — eq 32 surge added" if surge else "") + \
-          ("" if (hp_tau or printed) else " — eq 34 as printed")
+          ("" if (hp_tau or printed) else " — eq 34 as printed") + \
+          (f" — {solver}" if solver_tag else "")
 
-    plant, runs = run_all(printed, surge, scale, hp_tau)
+    plant, runs = run_all(printed, surge, scale, hp_tau, solver)
     print()
     draw(runs, FIG10, f"validation_fig10{tag}.png",
          f"Validation against Vajpayee Fig. 10 — open loop, "
